@@ -535,7 +535,16 @@ async function chooseFromRecent(): Promise<string | null> {
 async function resolveStartupInput(initialArgs: string[]): Promise<{ mode: 'quit' | 'search' | 'url' | 'last' | 'shuffle' | 'recent' | 'favorites'; value?: string }> {
   if (initialArgs.length > 0) {
     const joined = initialArgs.join(' ').trim();
-    return isLikelyUrl(joined) ? { mode: 'url', value: joined } : { mode: 'search', value: joined };
+    const parsed = parseStartupValue(joined);
+    if (parsed.mode === 'recent') {
+      const recent = await chooseFromRecent();
+      if (!recent) return { mode: 'quit' };
+      return { mode: 'search', value: recent };
+    }
+    if (parsed.mode === 'favorites') {
+      return { mode: 'favorites' };
+    }
+    return parsed;
   }
 
   const answer = await prompt('mux> ');

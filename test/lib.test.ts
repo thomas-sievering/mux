@@ -97,4 +97,11 @@ describe('parseStartupValue', () => {
       value: 'harry potter study ambience music',
     });
   });
+
+  test('supports unquoted multi-word cli-style searches', () => {
+    expect(parseStartupValue('harry potter winter')).toEqual({
+      mode: 'search',
+      value: 'harry potter winter ambience music',
+    });
+  });
 });
