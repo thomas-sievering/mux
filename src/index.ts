@@ -48,6 +48,12 @@ interface ConfigData {
   cookiesFile?: string;
 }
 
+interface DetectedBrowser {
+  name: 'chrome' | 'edge' | 'firefox' | 'brave';
+  details: string;
+  status?: 'works' | 'failed' | 'untested';
+}
+
 interface PlaybackState {
   title: string;
   duration?: number;
@@ -59,6 +65,9 @@ interface PlaybackState {
 const APP_NAME = 'mux';
 const MIN_DURATION_SECONDS = 20 * 60;
 const MAX_RESULTS = 10;
+const DEFAULT_VOLUME = 100;
+const FADE_IN_MS = 3000;
+const FADE_IN_STEPS = 12;
 const HELP_FLAGS = new Set(['-h', '--help']);
 const VERSION_FLAGS = new Set(['-v', '--version']);
 const BOT_CHECK_PATTERN = /sign in to confirm you're not a bot|use --cookies-from-browser or --cookies/i;
@@ -71,6 +80,28 @@ let playbackHeaderLines = 0;
 
 function clearScreen(): void {
   if (output.isTTY) output.write('\x1Bc');
+}
+
+function shortenTerminalTitle(title: string, maxLength = 28): string {
+  const normalized = title.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+
+  const separators = [' ~ ', ' — ', ' – ', ' | ', ' · ', ': '];
+  for (const separator of separators) {
+    const index = normalized.indexOf(separator);
+    if (index > 8 && index <= maxLength) return normalized.slice(0, index).trim();
+  }
+
+  const clipped = normalized.slice(0, maxLength + 1);
+  const lastSpace = clipped.lastIndexOf(' ');
+  if (lastSpace > 12) return clipped.slice(0, lastSpace).trim();
+
+  return normalized.slice(0, maxLength).trim();
+}
+
+function setTerminalTitle(title: string): void {
+  if (!output.isTTY) return;
+  output.write(`\x1b]0;${shortenTerminalTitle(title)}\x07`);
 }
 
 function getAppVersion(): string {
@@ -112,6 +143,7 @@ function printHelp(): void {
   console.log('  n next');
   console.log('  s stop and return to prompt');
   console.log('  f add favorite');
+  console.log('  o open in browser');
   console.log('  q quit');
   console.log('  1-9 volume');
 }
@@ -158,22 +190,133 @@ async function writeConfig(data: ConfigData): Promise<void> {
   await fs.writeFile(CONFIG_PATH, JSON.stringify(normalized, null, 2), 'utf8');
 }
 
-async function printSettings(): Promise<void> {
+function detectBrowsers(): DetectedBrowser[] {
+  const found: DetectedBrowser[] = [];
+  const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
+  const appData = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
+
+  const browserPaths: Array<{ name: DetectedBrowser['name']; paths: string[] }> = [
+    {
+      name: 'chrome',
+      paths: [
+        path.join(localAppData, 'Google', 'Chrome', 'User Data', 'Default', 'Network', 'Cookies'),
+        path.join(localAppData, 'Google', 'Chrome', 'User Data', 'Default', 'Cookies'),
+      ],
+    },
+    {
+      name: 'edge',
+      paths: [
+        path.join(localAppData, 'Microsoft', 'Edge', 'User Data', 'Default', 'Network', 'Cookies'),
+        path.join(localAppData, 'Microsoft', 'Edge', 'User Data', 'Default', 'Cookies'),
+      ],
+    },
+    {
+      name: 'brave',
+      paths: [
+        path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data', 'Default', 'Network', 'Cookies'),
+        path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data', 'Default', 'Cookies'),
+      ],
+    },
+  ];
+
+  for (const browser of browserPaths) {
+    const existing = browser.paths.find((candidate) => fsSync.existsSync(candidate));
+    if (existing) found.push({ name: browser.name, details: existing, status: 'untested' });
+  }
+
+  const firefoxProfiles = path.join(appData, 'Mozilla', 'Firefox', 'Profiles');
+  if (fsSync.existsSync(firefoxProfiles)) {
+    try {
+      const profile = fsSync
+        .readdirSync(firefoxProfiles, { withFileTypes: true })
+        .find((entry) => entry.isDirectory() && fsSync.existsSync(path.join(firefoxProfiles, entry.name, 'cookies.sqlite')));
+      if (profile) found.push({ name: 'firefox', details: path.join(firefoxProfiles, profile.name, 'cookies.sqlite'), status: 'untested' });
+    } catch {
+      // ignore detection errors
+    }
+  }
+
+  const order: Record<DetectedBrowser['name'], number> = { edge: 0, chrome: 1, brave: 2, firefox: 3 };
+  return found.sort((a, b) => order[a.name] - order[b.name]);
+}
+
+function formatBrowserLabel(browser: DetectedBrowser, config: ConfigData): string {
+  const tags: string[] = [];
+  if (config.cookiesFromBrowser === browser.name) tags.push('saved');
+  if (browser.status && browser.status !== 'untested') tags.push(browser.status);
+  return tags.length > 0 ? `${browser.name} [${tags.join(', ')}]` : browser.name;
+}
+
+async function printSettings(options?: { reason?: string; browsers?: DetectedBrowser[]; compactEnvHint?: boolean }): Promise<void> {
   const config = await readConfig();
   const envBrowser = process.env.MUX_COOKIES_FROM_BROWSER?.trim();
   const envCookies = process.env.MUX_COOKIES?.trim();
+  const browsers = options?.browsers ?? detectBrowsers();
+
+  if (options?.reason) console.log(options.reason);
+
   console.log('Settings');
-  console.log(`- config path: ${CONFIG_PATH}`);
-  console.log(`- cookies from browser: ${config.cookiesFromBrowser ?? 'none'}`);
-  console.log(`- cookies file: ${config.cookiesFile ?? 'none'}`);
+  console.log(`Config: ${CONFIG_PATH}`);
+  console.log(`Saved browser: ${config.cookiesFromBrowser ?? 'none'}`);
+  console.log(`Saved file: ${config.cookiesFile ?? 'none'}`);
+
+  console.log('');
+  console.log('Detected browsers');
+  if (browsers.length > 0) {
+    browsers.forEach((browser, index) => console.log(`  ${index + 1}. ${formatBrowserLabel(browser, config)}`));
+  } else {
+    console.log('  none');
+  }
+
   if (envBrowser || envCookies) {
-    console.log('- env override active: yes');
+    console.log('');
+    console.log('Env override');
     if (envBrowser) console.log(`  MUX_COOKIES_FROM_BROWSER=${envBrowser}`);
     if (envCookies) console.log(`  MUX_COOKIES=${envCookies}`);
-  } else {
-    console.log('- env override active: no');
   }
-  console.log('Commands: cookies chrome | cookies edge | cookies firefox | cookies brave | cookies file <path> | cookies off');
+
+  console.log('');
+  console.log('Commands');
+  if (browsers.length > 0) console.log('  <number>                 Use detected browser');
+  console.log('  cookies chrome|edge|firefox|brave');
+  console.log('  cookies file <path>');
+  console.log('  cookies off');
+
+  if (!options?.compactEnvHint) {
+    console.log('');
+    console.log('Env vars');
+    console.log('  MUX_COOKIES_FROM_BROWSER=<browser>');
+    console.log('  MUX_COOKIES=<file>');
+  }
+
+  console.log('');
+  console.log('Enter to go back');
+}
+
+function isBotCheckError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return BOT_CHECK_PATTERN.test(message);
+}
+
+async function openSettingsPrompt(reason?: string, browsers = detectBrowsers()): Promise<boolean> {
+  while (true) {
+    await printSettings({ reason, browsers, compactEnvHint: true });
+    reason = undefined;
+    const answer = await prompt('settings> ');
+    const trimmed = answer.trim();
+    if (!trimmed) return false;
+    const picked = Number(trimmed);
+    if (Number.isInteger(picked) && picked >= 1 && picked <= browsers.length) {
+      const browser = browsers[picked - 1]!;
+      await writeConfig({ cookiesFromBrowser: browser.name, cookiesFile: undefined });
+      console.log(`Saved cookies browser: ${browser.name}`);
+      return true;
+    }
+    const before = JSON.stringify(await readConfig());
+    await handleSettingsCommand(trimmed);
+    const after = JSON.stringify(await readConfig());
+    if (before !== after) return true;
+  }
 }
 
 async function handleSettingsCommand(inputValue: string): Promise<boolean> {
@@ -329,16 +472,32 @@ async function getYtDlpAuthArgs(): Promise<string[]> {
   return [];
 }
 
+async function runYtDlpWithAuth(authArgs: string[], args: string[]): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn('yt-dlp', [...authArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(formatYtDlpError(stderr, code));
+    });
+  });
+}
+
 function formatYtDlpError(stderr: string, exitCode: number | null): Error {
   const trimmed = stderr.trim();
   if (BOT_CHECK_PATTERN.test(trimmed)) {
     return new Error(
       [
         'YouTube asked yt-dlp to sign in and confirm you are not a bot.',
-        'Set one of these before running mux, or configure it in-app:',
-        '  settings',
+        'Open mux settings and configure one of these:',
         '  cookies chrome',
         '  cookies edge',
+        '  cookies firefox',
+        '  cookies brave',
         '  cookies file /path/to/cookies.txt',
         'Or use env vars:',
         '  MUX_COOKIES_FROM_BROWSER=chrome',
@@ -356,18 +515,40 @@ function formatYtDlpError(stderr: string, exitCode: number | null): Error {
 
 async function runYtDlp(args: string[]): Promise<string> {
   const authArgs = await getYtDlpAuthArgs();
-  return await new Promise<string>((resolve, reject) => {
-    const child = spawn('yt-dlp', [...authArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
-    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(formatYtDlpError(stderr, code));
-    });
-  });
+  return await runYtDlpWithAuth(authArgs, args);
+}
+
+async function probeBrowserCookies(browser: DetectedBrowser['name']): Promise<boolean> {
+  try {
+    await runYtDlpWithAuth(['--cookies-from-browser', browser], [
+      '--dump-single-json',
+      '--skip-download',
+      '--no-warnings',
+      'ytsearch1:ambient music',
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function autoConfigureBrowserCookies(): Promise<DetectedBrowser | null> {
+  if (process.env.MUX_COOKIES_FROM_BROWSER?.trim() || process.env.MUX_COOKIES?.trim()) return null;
+  const browsers = detectBrowsers();
+  if (browsers.length === 0) return null;
+
+  console.log(dim('Trying detected browser cookies...'));
+  for (const browser of browsers) {
+    output.write(`${dim(`- testing ${browser.name}...`)}` + '\n');
+    const works = await probeBrowserCookies(browser.name);
+    browser.status = works ? 'works' : 'failed';
+    if (works) {
+      await writeConfig({ cookiesFromBrowser: browser.name, cookiesFile: undefined });
+      console.log(`Using ${browser.name} cookies.`);
+      return browser;
+    }
+  }
+  return null;
 }
 
 async function searchYoutube(query: string): Promise<SearchEntry[]> {
@@ -517,12 +698,42 @@ async function terminateProcess(child: ReturnType<typeof spawn>): Promise<void> 
   if (!child.killed) child.kill('SIGKILL');
 }
 
+async function openExternalUrl(url: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = process.platform === 'win32'
+      ? spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', windowsHide: true })
+      : process.platform === 'darwin'
+        ? spawn('open', [url], { stdio: 'ignore' })
+        : spawn('xdg-open', [url], { stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
+async function fadeInVolume(ipcPath: string, isCancelled: () => boolean): Promise<void> {
+  const stepDelay = Math.max(1, Math.floor(FADE_IN_MS / FADE_IN_STEPS));
+  for (let step = 1; step <= FADE_IN_STEPS; step += 1) {
+    if (isCancelled()) return;
+    const volume = Math.round((DEFAULT_VOLUME * step) / FADE_IN_STEPS);
+    try {
+      await sendMpvCommand(ipcPath, ['set_property', 'volume', volume]);
+    } catch {
+      return;
+    }
+    await sleep(stepDelay);
+  }
+}
+
 async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise<'stopped' | 'next' | 'quit'> {
   const ipcPath = getIpcPath();
   const mpvArgs = [
     '--no-video',
     '--quiet',
     '--input-terminal=no',
+    '--volume=0',
     `--input-ipc-server=${ipcPath}`,
     entry.url,
   ];
@@ -542,6 +753,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   let socket: net.Socket | null = null;
   let buffer = '';
   let tick = 0;
+  let cancelFadeIn = false;
 
   try {
     await waitForSocket(ipcPath);
@@ -578,9 +790,10 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   }
 
   clearScreen();
+  setTerminalTitle(`♫ ${entry.title}`);
   playbackHeaderLines = 0;
   console.log(soft(entry.title));
-  console.log(dim('[p]ause  [n]ext  [s]top  [f]av  [q]uit  [1-9] vol'));
+  console.log(dim('[p]ause  [n]ext  [s]top  [f]av  [o]pen  [q]uit  [1-9] vol'));
   shownPlaybackHelp = true;
 
   const oldRaw = input.isRaw;
@@ -607,6 +820,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
 
   const interval = setInterval(render, 150);
   render();
+  void fadeInVolume(ipcPath, () => cancelFadeIn || state.stopped);
 
   const onKey = async (key: string) => {
     const char = key.toLowerCase();
@@ -627,6 +841,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
     try {
       if (/^[1-9]$/.test(char)) {
         commandBuffer = '';
+        cancelFadeIn = true;
         const volume = Number(char) * 10;
         await sendMpvCommand(ipcPath, ['set_property', 'volume', volume]);
       }
@@ -654,6 +869,12 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
         output.write(`\r${dim(added ? 'saved to favorites' : 'already in favorites')}`);
         await sleep(700);
       }
+      if (char === 'o' || commandBuffer.endsWith('open')) {
+        commandBuffer = '';
+        await openExternalUrl(entry.url);
+        output.write(`\r${dim('opened in browser')}`);
+        await sleep(700);
+      }
       if (char === 'q' || commandBuffer.endsWith('quit')) {
         commandBuffer = '';
         state.stopped = true;
@@ -677,6 +898,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
     child.on('error', () => resolve());
   });
 
+  cancelFadeIn = true;
   clearInterval(interval);
   output.write(`\r${' '.repeat(lastLineWidth)}\r`);
   showCursor();
@@ -750,6 +972,7 @@ async function main(): Promise<void> {
   }
 
   clearScreen();
+  setTerminalTitle('♫ mux');
   await requireCommand('yt-dlp');
   await requireCommand('mpv');
 
@@ -791,29 +1014,57 @@ async function main(): Promise<void> {
     }
 
     if (!selected && startup.mode === 'url') {
-      const stopSpinner = startSpinner('loading');
-      try {
-        selected = await inspectUrl(query);
-      } catch (error) {
-        console.log(error instanceof Error ? error.message : String(error));
-        continue;
-      } finally {
-        stopSpinner();
+      while (!selected) {
+        const stopSpinner = startSpinner('loading');
+        try {
+          selected = await inspectUrl(query);
+        } catch (error) {
+          if (isBotCheckError(error)) {
+            const detected = await autoConfigureBrowserCookies();
+            if (detected) continue;
+            const updated = await openSettingsPrompt('YouTube bot-check detected. I could not automatically verify your local browser cookies. Pick one below and mux will save it.');
+            if (updated) continue;
+          } else {
+            console.log(error instanceof Error ? error.message : String(error));
+          }
+          break;
+        } finally {
+          stopSpinner();
+        }
       }
+      if (!selected) continue;
     }
 
     let queue: SearchEntry[] = [];
     if (!selected && query) {
-      const stopSpinner = startSpinner();
       let results: SearchEntry[] = [];
-      try {
-        results = await searchYoutube(query);
-      } catch (error) {
-        console.log(error instanceof Error ? error.message : String(error));
-        continue;
-      } finally {
-        stopSpinner();
+      let searchFailed = false;
+      while (results.length === 0) {
+        const stopSpinner = startSpinner();
+        try {
+          results = await searchYoutube(query);
+        } catch (error) {
+          searchFailed = true;
+          if (isBotCheckError(error)) {
+            const detected = await autoConfigureBrowserCookies();
+            if (detected) {
+              searchFailed = false;
+              continue;
+            }
+            const updated = await openSettingsPrompt('YouTube bot-check detected. I could not automatically verify your local browser cookies. Pick one below and mux will save it.');
+            if (updated) {
+              searchFailed = false;
+              continue;
+            }
+          } else {
+            console.log(error instanceof Error ? error.message : String(error));
+          }
+          break;
+        } finally {
+          stopSpinner();
+        }
       }
+      if (searchFailed) continue;
       if (results.length === 0) {
         console.log('No results found.');
         continue;
@@ -857,10 +1108,12 @@ async function main(): Promise<void> {
 
     if (shouldQuit) return;
     clearScreen();
+    setTerminalTitle('♫ mux');
   }
 }
 
 main().catch((error) => {
+  setTerminalTitle('♫ mux');
   console.error(`${APP_NAME}: ${error instanceof Error ? error.message : String(error)}`);
   exit(1);
 });
