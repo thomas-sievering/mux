@@ -246,6 +246,8 @@ function startSpinner(label = 'searching'): () => void {
   let index = 0;
   let lastWidth = 0;
 
+  hideCursor();
+
   const render = () => {
     const text = `mux> ${dim(`${label}${frames[index % frames.length]}`)}`;
     const plain = `mux> ${label}${frames[index % frames.length]}`;
@@ -260,6 +262,7 @@ function startSpinner(label = 'searching'): () => void {
   return () => {
     clearInterval(timer);
     output.write(`\r${' '.repeat(lastWidth)}\r`);
+    showCursor();
   };
 }
 
