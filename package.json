@@ -1,0 +1,19 @@
+{
+  "name": "mux",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "mux": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "bun run dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  },
+  "packageManager": "bun@1"
+}
