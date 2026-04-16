@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "bun run dist/index.js"
+    "start": "bun run dist/index.js",
+    "install:global": "bun run build && bun link"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

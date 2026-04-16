@@ -43,7 +43,17 @@ bun run build
 Optional global link:
 
 ```bash
-bun link
+bun run install:global
+```
+
+Or use the helper scripts:
+
+```powershell
+./scripts/install-global.ps1
+```
+
+```bash
+sh ./scripts/install-global.sh
 ```
 
 Then you can run:
