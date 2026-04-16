@@ -61,6 +61,7 @@ interface PlaybackState {
   playbackTime: number;
   paused: boolean;
   stopped: boolean;
+  loop: boolean;
 }
 
 const APP_NAME = 'mux';
@@ -146,6 +147,7 @@ function printHelp(): void {
   console.log('  n next');
   console.log('  s stop and return to prompt');
   console.log('  f add favorite');
+  console.log('  l toggle loop');
   console.log('  o open in browser');
   console.log('  q quit');
   console.log('  1-9 volume');
@@ -767,7 +769,7 @@ async function fadeOutAndQuit(ipcPath: string, child: ReturnType<typeof spawn>, 
   await terminateProcess(child);
 }
 
-async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise<'stopped' | 'next' | 'quit'> {
+async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise<'stopped' | 'next' | 'quit' | 'loop'> {
   const ipcPath = getIpcPath();
   const mpvArgs = [
     '--no-video',
@@ -789,6 +791,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
     playbackTime: 0,
     paused: false,
     stopped: false,
+    loop: false,
   };
 
   let socket: net.Socket | null = null;
@@ -837,7 +840,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   setTerminalTitle(`♫ ${entry.title}`);
   playbackHeaderLines = 0;
   console.log(soft(entry.title));
-  console.log(dim('[p]ause  [n]ext  [s]top  [f]av  [o]pen  [q]uit  [1-9] vol'));
+  console.log(dim('[p]ause  [n]ext  [s]top  [f]av  [l]oop  [o]pen  [q]uit  [1-9] vol'));
   shownPlaybackHelp = true;
 
   const oldRaw = input.isRaw;
@@ -846,12 +849,12 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   input.resume();
   input.setEncoding('utf8');
 
-  let result: 'stopped' | 'next' | 'quit' = 'stopped';
+  let result: 'stopped' | 'next' | 'quit' | 'loop' = 'stopped';
   let commandBuffer = '';
 
   let lastLineWidth = 0;
   const render = () => {
-    const status = state.paused ? 'paused' : 'play';
+    const status = `${state.paused ? 'paused' : 'play'}${state.loop ? ' ↻' : ''}`;
     const viz = state.paused || state.stopped ? '          ' : renderVisualizer(tick);
     if (!state.paused && !state.stopped) tick += 0.35;
     const visibleLine = `[${formatDuration(state.playbackTime)} / ${formatDuration(state.duration)}] ${status} ${viz}`
@@ -917,6 +920,10 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
         output.write(`\r${dim(added ? 'saved to favorites' : 'already in favorites')}`);
         await sleep(700);
       }
+      if (char === 'l' || commandBuffer.endsWith('loop')) {
+        commandBuffer = '';
+        state.loop = !state.loop;
+      }
       if (char === 'o' || commandBuffer.endsWith('open')) {
         commandBuffer = '';
         await openExternalUrl(entry.url);
@@ -962,6 +969,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
     try { await fs.unlink(ipcPath); } catch {}
   }
 
+  if (!state.stopped && state.loop) return 'loop';
   if (result === 'stopped' && queue.length > 0 && !state.stopped) return 'next';
   return result;
 }
@@ -1142,6 +1150,7 @@ async function main(): Promise<void> {
         break;
       }
       if (result === 'stopped') break;
+      if (result === 'loop') continue;
       current = queue.shift() ?? null;
       if (current) {
         await appendHistory({

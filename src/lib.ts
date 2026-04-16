@@ -50,13 +50,8 @@ export function pickWeightedRandom(queries: string[], random = Math.random): str
 }
 
 export function renderVisualizer(tick: number): string {
-  const chars = ['▁', '▂', '▃', '▄', '▅', '▆'];
-  let out = '';
-  for (let i = 0; i < 12; i += 1) {
-    const idx = Math.abs(Math.floor(Math.sin((tick + i) / 2) * 5)) % chars.length;
-    out += chars[idx];
-  }
-  return out;
+  const frames = ['⠁', '⠂', '⠄', '⠂'];
+  return frames[Math.abs(Math.floor(tick)) % frames.length] ?? frames[0]!;
 }
 
 export type StartupMode = 'quit' | 'search' | 'url' | 'last' | 'shuffle' | 'recent' | 'favorites';

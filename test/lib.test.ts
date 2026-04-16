@@ -62,8 +62,9 @@ describe('pickWeightedRandom', () => {
 });
 
 describe('renderVisualizer', () => {
-  test('returns 12 chars', () => {
-    expect(renderVisualizer(0)).toHaveLength(12);
+  test('returns a single braille frame', () => {
+    expect(renderVisualizer(0)).toHaveLength(1);
+    expect(renderVisualizer(1)).not.toBe(renderVisualizer(0));
   });
 });
 
