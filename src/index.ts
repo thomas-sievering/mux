@@ -402,15 +402,11 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
     // status will still work without IPC updates
   }
 
-  clearCurrentScreenLine();
-  clearPlaybackHeader();
+  clearScreen();
+  playbackHeaderLines = 0;
   console.log(soft(entry.title));
-  playbackHeaderLines = 1;
-  if (!shownPlaybackHelp) {
-    console.log(dim('[p]ause  [n]ext  [s]top  [f]av  [q]uit  [1-9] vol'));
-    shownPlaybackHelp = true;
-    playbackHeaderLines = 2;
-  }
+  console.log(dim('[p]ause  [n]ext  [s]top  [f]av  [q]uit  [1-9] vol'));
+  shownPlaybackHelp = true;
 
   const oldRaw = input.isRaw;
   if (input.isTTY) input.setRawMode(true);
