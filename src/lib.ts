@@ -50,7 +50,7 @@ export function pickWeightedRandom(queries: string[], random = Math.random): str
 }
 
 export function renderVisualizer(tick: number): string {
-  const frames = ['⠁', '⠂', '⠄', '⠂'];
+  const frames = ['·', '•', '◦', '•'];
   return frames[Math.abs(Math.floor(tick)) % frames.length] ?? frames[0]!;
 }
 

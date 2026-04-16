@@ -180,7 +180,7 @@ MUX_COOKIES=/path/to/cookies.txt mux
 Shown in the app as:
 
 ```text
-[p]ause  [n]ext  [s]top  [f]av  [o]pen  [q]uit  [1-9] vol
+[p]ause  [n]ext  [s]top  [f]av  [l]oop  [o]pen  [q]uit  [1-9] vol
 ```
 
 Meaning:
@@ -189,6 +189,7 @@ Meaning:
 - `n` skip to next result
 - `s` stop playback and return to the `mux>` prompt
 - `f` add current track to favorites
+- `l` toggle loop for the current track
 - `o` open the current YouTube link in your browser
 - `q` quit `mux`
 - `1-9` set volume from 10% to 90% and remember it for later sessions
@@ -198,6 +199,7 @@ Typed commands also work while playing:
 - `skip`
 - `stop`
 - `fav`
+- `loop`
 - `open`
 - `quit`
 

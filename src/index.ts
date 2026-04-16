@@ -62,6 +62,7 @@ interface PlaybackState {
   paused: boolean;
   stopped: boolean;
   loop: boolean;
+  loading: boolean;
 }
 
 const APP_NAME = 'mux';
@@ -86,7 +87,7 @@ function clearScreen(): void {
   if (output.isTTY) output.write('\x1Bc');
 }
 
-function shortenTerminalTitle(title: string, maxLength = 28): string {
+function shortenTerminalTitle(title: string, maxLength = 24): string {
   const normalized = title.replace(/\s+/g, ' ').trim();
   if (normalized.length <= maxLength) return normalized;
 
@@ -792,6 +793,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
     paused: false,
     stopped: false,
     loop: false,
+    loading: true,
   };
 
   let socket: net.Socket | null = null;
@@ -813,7 +815,10 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
         try {
           const msg = JSON.parse(trimmed);
           if (msg.event === 'property-change') {
-            if (msg.name === 'playback-time' && typeof msg.data === 'number') state.playbackTime = msg.data;
+            if (msg.name === 'playback-time' && typeof msg.data === 'number') {
+              state.playbackTime = msg.data;
+              if (msg.data > 0) state.loading = false;
+            }
             if (msg.name === 'duration' && typeof msg.data === 'number') state.duration = msg.data;
             if (msg.name === 'pause' && typeof msg.data === 'boolean') state.paused = msg.data;
             if (msg.name === 'volume' && typeof msg.data === 'number') currentVolume = msg.data;
@@ -854,9 +859,10 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
 
   let lastLineWidth = 0;
   const render = () => {
-    const status = `${state.paused ? 'paused' : 'play'}${state.loop ? ' ↻' : ''}`;
-    const viz = state.paused || state.stopped ? '          ' : renderVisualizer(tick);
-    if (!state.paused && !state.stopped) tick += 0.35;
+    const baseStatus = state.loading ? 'loading' : state.paused ? 'paused' : 'play';
+    const status = `${baseStatus}${state.loop ? ' ↻' : ''}`;
+    const viz = state.paused || state.stopped || state.loading ? ' ' : renderVisualizer(tick);
+    if (!state.paused && !state.stopped && !state.loading) tick += 0.35;
     const visibleLine = `[${formatDuration(state.playbackTime)} / ${formatDuration(state.duration)}] ${status} ${viz}`
       .slice(0, Math.max(20, (output.columns ?? 80) - 1));
     const paddedVisible = visibleLine.padEnd(lastLineWidth);
@@ -868,7 +874,10 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   const interval = setInterval(render, 150);
   render();
   void fadeInVolume(ipcPath, preferredVolume, state, () => cancelFadeIn || state.stopped).then(() => {
-    if (!cancelFadeIn && !state.stopped) currentVolume = preferredVolume;
+    if (!cancelFadeIn && !state.stopped) {
+      currentVolume = preferredVolume;
+      state.loading = false;
+    }
   });
 
   const onKey = async (key: string) => {
@@ -877,7 +886,8 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
       cancelFadeIn = true;
       state.stopped = true;
       result = 'quit';
-      await fadeOutAndQuit(ipcPath, child, currentVolume || preferredVolume);
+      try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
+      await terminateProcess(child);
       return;
     }
 

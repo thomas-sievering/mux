@@ -62,7 +62,7 @@ describe('pickWeightedRandom', () => {
 });
 
 describe('renderVisualizer', () => {
-  test('returns a single braille frame', () => {
+  test('returns a single ultra-minimal frame', () => {
     expect(renderVisualizer(0)).toHaveLength(1);
     expect(renderVisualizer(1)).not.toBe(renderVisualizer(0));
   });
