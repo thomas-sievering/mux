@@ -46,6 +46,12 @@ Optional global link:
 bun run install:global
 ```
 
+The installer will:
+- build `mux`
+- register/link it with Bun
+- check whether `mux` is already available on your `PATH`
+- print Bun's global bin directory if it is not
+
 Or use the helper scripts:
 
 ```powershell
@@ -61,6 +67,8 @@ Then you can run:
 ```bash
 mux
 ```
+
+If `mux` is not found, open a new terminal first. If it still is not found, add the directory printed by the installer (`bun pm bin`) to your `PATH`.
 
 ## Development
 
