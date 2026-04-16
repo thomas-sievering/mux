@@ -43,6 +43,11 @@ interface FavoritesData {
   items: FavoriteItem[];
 }
 
+interface ConfigData {
+  cookiesFromBrowser?: string;
+  cookiesFile?: string;
+}
+
 interface PlaybackState {
   title: string;
   duration?: number;
@@ -54,14 +59,61 @@ interface PlaybackState {
 const APP_NAME = 'mux';
 const MIN_DURATION_SECONDS = 20 * 60;
 const MAX_RESULTS = 10;
+const HELP_FLAGS = new Set(['-h', '--help']);
+const VERSION_FLAGS = new Set(['-v', '--version']);
+const BOT_CHECK_PATTERN = /sign in to confirm you're not a bot|use --cookies-from-browser or --cookies/i;
 const HISTORY_DIR = path.join(os.homedir(), '.mux');
 const HISTORY_PATH = path.join(HISTORY_DIR, 'history.json');
 const FAVORITES_PATH = path.join(HISTORY_DIR, 'favorites.json');
+const CONFIG_PATH = path.join(HISTORY_DIR, 'config.json');
 let shownPlaybackHelp = false;
 let playbackHeaderLines = 0;
 
 function clearScreen(): void {
   if (output.isTTY) output.write('\x1Bc');
+}
+
+function getAppVersion(): string {
+  try {
+    const raw = fsSync.readFileSync(new URL('../package.json', import.meta.url), 'utf8');
+    const pkg = JSON.parse(raw) as { version?: string };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function printHelp(): void {
+  console.log(`${APP_NAME} ${getAppVersion()}`);
+  console.log('');
+  console.log('Usage:');
+  console.log(`  ${APP_NAME}                         Start interactive prompt`);
+  console.log(`  ${APP_NAME} <query>                 Search YouTube and play`);
+  console.log(`  ${APP_NAME} <youtube-url>           Play a specific YouTube URL`);
+  console.log(`  ${APP_NAME} last                    Replay last item`);
+  console.log(`  ${APP_NAME} recent                  Choose from recent searches`);
+  console.log(`  ${APP_NAME} shuffle                 Pick from history`);
+  console.log(`  ${APP_NAME} fav                     Choose from favorites`);
+  console.log(`  ${APP_NAME} --help                  Show this help`);
+  console.log(`  ${APP_NAME} --version               Show version`);
+  console.log('');
+  console.log('Interactive settings:');
+  console.log('  settings                           Show mux settings');
+  console.log('  cookies chrome|edge|firefox|brave  Save browser cookies source');
+  console.log('  cookies file <path>                Save cookies file path');
+  console.log('  cookies off                        Clear saved cookies settings');
+  console.log('');
+  console.log('Environment:');
+  console.log('  MUX_COOKIES_FROM_BROWSER=<browser>  Pass --cookies-from-browser to yt-dlp');
+  console.log('  MUX_COOKIES=<file>                  Pass --cookies <file> to yt-dlp');
+  console.log('');
+  console.log('Playback keys:');
+  console.log('  p pause/resume');
+  console.log('  n next');
+  console.log('  s stop and return to prompt');
+  console.log('  f add favorite');
+  console.log('  q quit');
+  console.log('  1-9 volume');
 }
 
 function dim(text: string): string {
@@ -81,6 +133,86 @@ async function ensureHistory(): Promise<void> {
   if (!fsSync.existsSync(HISTORY_PATH)) {
     await fs.writeFile(HISTORY_PATH, JSON.stringify({ plays: [] }, null, 2), 'utf8');
   }
+}
+
+async function readConfig(): Promise<ConfigData> {
+  await ensureHistory();
+  try {
+    if (!fsSync.existsSync(CONFIG_PATH)) return {};
+    const raw = await fs.readFile(CONFIG_PATH, 'utf8');
+    const data = JSON.parse(raw) as Partial<ConfigData>;
+    return {
+      cookiesFromBrowser: typeof data.cookiesFromBrowser === 'string' ? data.cookiesFromBrowser : undefined,
+      cookiesFile: typeof data.cookiesFile === 'string' ? data.cookiesFile : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function writeConfig(data: ConfigData): Promise<void> {
+  await ensureHistory();
+  const normalized: ConfigData = {};
+  if (data.cookiesFromBrowser?.trim()) normalized.cookiesFromBrowser = data.cookiesFromBrowser.trim();
+  if (data.cookiesFile?.trim()) normalized.cookiesFile = data.cookiesFile.trim();
+  await fs.writeFile(CONFIG_PATH, JSON.stringify(normalized, null, 2), 'utf8');
+}
+
+async function printSettings(): Promise<void> {
+  const config = await readConfig();
+  const envBrowser = process.env.MUX_COOKIES_FROM_BROWSER?.trim();
+  const envCookies = process.env.MUX_COOKIES?.trim();
+  console.log('Settings');
+  console.log(`- config path: ${CONFIG_PATH}`);
+  console.log(`- cookies from browser: ${config.cookiesFromBrowser ?? 'none'}`);
+  console.log(`- cookies file: ${config.cookiesFile ?? 'none'}`);
+  if (envBrowser || envCookies) {
+    console.log('- env override active: yes');
+    if (envBrowser) console.log(`  MUX_COOKIES_FROM_BROWSER=${envBrowser}`);
+    if (envCookies) console.log(`  MUX_COOKIES=${envCookies}`);
+  } else {
+    console.log('- env override active: no');
+  }
+  console.log('Commands: cookies chrome | cookies edge | cookies firefox | cookies brave | cookies file <path> | cookies off');
+}
+
+async function handleSettingsCommand(inputValue: string): Promise<boolean> {
+  const trimmed = inputValue.trim();
+  if (!trimmed) return false;
+  if (trimmed === 'settings') {
+    await printSettings();
+    return true;
+  }
+  if (!trimmed.startsWith('cookies')) return false;
+
+  const [, subcommand, ...rest] = trimmed.split(/\s+/);
+  const config = await readConfig();
+
+  if (subcommand === 'off') {
+    await writeConfig({});
+    console.log('Cleared saved cookies settings.');
+    return true;
+  }
+
+  if (subcommand === 'file') {
+    const filePath = rest.join(' ').trim();
+    if (!filePath) {
+      console.log('Usage: cookies file <path>');
+      return true;
+    }
+    await writeConfig({ ...config, cookiesFromBrowser: undefined, cookiesFile: filePath });
+    console.log(`Saved cookies file: ${filePath}`);
+    return true;
+  }
+
+  if (subcommand && ['chrome', 'edge', 'firefox', 'brave'].includes(subcommand)) {
+    await writeConfig({ ...config, cookiesFromBrowser: subcommand, cookiesFile: undefined });
+    console.log(`Saved cookies browser: ${subcommand}`);
+    return true;
+  }
+
+  console.log('Usage: cookies chrome|edge|firefox|brave | cookies file <path> | cookies off');
+  return true;
 }
 
 async function readFavorites(): Promise<FavoritesData> {
@@ -185,9 +317,47 @@ function normalizeEntry(entry: any): SearchEntry | null {
   };
 }
 
+async function getYtDlpAuthArgs(): Promise<string[]> {
+  const cookiesFromBrowser = process.env.MUX_COOKIES_FROM_BROWSER?.trim();
+  const cookies = process.env.MUX_COOKIES?.trim();
+  if (cookiesFromBrowser) return ['--cookies-from-browser', cookiesFromBrowser];
+  if (cookies) return ['--cookies', cookies];
+
+  const config = await readConfig();
+  if (config.cookiesFromBrowser) return ['--cookies-from-browser', config.cookiesFromBrowser];
+  if (config.cookiesFile) return ['--cookies', config.cookiesFile];
+  return [];
+}
+
+function formatYtDlpError(stderr: string, exitCode: number | null): Error {
+  const trimmed = stderr.trim();
+  if (BOT_CHECK_PATTERN.test(trimmed)) {
+    return new Error(
+      [
+        'YouTube asked yt-dlp to sign in and confirm you are not a bot.',
+        'Set one of these before running mux, or configure it in-app:',
+        '  settings',
+        '  cookies chrome',
+        '  cookies edge',
+        '  cookies file /path/to/cookies.txt',
+        'Or use env vars:',
+        '  MUX_COOKIES_FROM_BROWSER=chrome',
+        '  MUX_COOKIES_FROM_BROWSER=edge',
+        '  MUX_COOKIES=/path/to/cookies.txt',
+        'Example:',
+        process.platform === 'win32'
+          ? '  PowerShell: $env:MUX_COOKIES_FROM_BROWSER="edge"; mux'
+          : '  MUX_COOKIES_FROM_BROWSER=firefox mux',
+      ].join('\n'),
+    );
+  }
+  return new Error(trimmed || `yt-dlp failed with code ${exitCode}`);
+}
+
 async function runYtDlp(args: string[]): Promise<string> {
+  const authArgs = await getYtDlpAuthArgs();
   return await new Promise<string>((resolve, reject) => {
-    const child = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('yt-dlp', [...authArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += String(chunk); });
@@ -195,7 +365,7 @@ async function runYtDlp(args: string[]): Promise<string> {
     child.on('error', reject);
     child.on('exit', (code) => {
       if (code === 0) resolve(stdout);
-      else reject(new Error(stderr || `yt-dlp failed with code ${code}`));
+      else reject(formatYtDlpError(stderr, code));
     });
   });
 }
@@ -550,31 +720,38 @@ async function resolveStartupInput(initialArgs: string[]): Promise<{ mode: 'quit
       if (!recent) return { mode: 'quit' };
       return { mode: 'search', value: recent };
     }
-    if (parsed.mode === 'favorites') {
-      return { mode: 'favorites' };
-    }
+    if (parsed.mode === 'favorites') return { mode: 'favorites' };
     return parsed;
   }
 
-  const answer = await prompt('mux> ');
-  const parsed = parseStartupValue(answer);
-  if (parsed.mode === 'recent') {
-    const recent = await chooseFromRecent();
-    if (!recent) return { mode: 'quit' };
-    return { mode: 'search', value: recent };
+  while (true) {
+    const answer = await prompt('mux> ');
+    if (await handleSettingsCommand(answer)) continue;
+    const parsed = parseStartupValue(answer);
+    if (parsed.mode === 'recent') {
+      const recent = await chooseFromRecent();
+      if (!recent) return { mode: 'quit' };
+      return { mode: 'search', value: recent };
+    }
+    if (parsed.mode === 'favorites') return { mode: 'favorites' };
+    return parsed;
   }
-  if (parsed.mode === 'favorites') {
-    return { mode: 'favorites' };
-  }
-  return parsed;
 }
 
 async function main(): Promise<void> {
+  let initialArgs = process.argv.slice(2);
+  if (initialArgs.some((arg) => HELP_FLAGS.has(arg))) {
+    printHelp();
+    return;
+  }
+  if (initialArgs.some((arg) => VERSION_FLAGS.has(arg))) {
+    console.log(getAppVersion());
+    return;
+  }
+
   clearScreen();
   await requireCommand('yt-dlp');
   await requireCommand('mpv');
-
-  let initialArgs = process.argv.slice(2);
 
   while (true) {
     const startup = await resolveStartupInput(initialArgs);
@@ -617,6 +794,9 @@ async function main(): Promise<void> {
       const stopSpinner = startSpinner('loading');
       try {
         selected = await inspectUrl(query);
+      } catch (error) {
+        console.log(error instanceof Error ? error.message : String(error));
+        continue;
       } finally {
         stopSpinner();
       }
@@ -625,7 +805,15 @@ async function main(): Promise<void> {
     let queue: SearchEntry[] = [];
     if (!selected && query) {
       const stopSpinner = startSpinner();
-      const results = await searchYoutube(query).finally(stopSpinner);
+      let results: SearchEntry[] = [];
+      try {
+        results = await searchYoutube(query);
+      } catch (error) {
+        console.log(error instanceof Error ? error.message : String(error));
+        continue;
+      } finally {
+        stopSpinner();
+      }
       if (results.length === 0) {
         console.log('No results found.');
         continue;

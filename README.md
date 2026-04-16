@@ -98,6 +98,13 @@ bun test
 mux
 ```
 
+### Help
+
+```bash
+mux --help
+mux --version
+```
+
 Prompt commands:
 
 - search keywords
@@ -107,6 +114,26 @@ Prompt commands:
 - `shuffle`
 - `fav` / `favs` / `favorites`
 - `q`
+
+CLI flags:
+
+- `-h` / `--help`
+- `-v` / `--version`
+
+Environment variables:
+
+- `MUX_COOKIES_FROM_BROWSER=<browser>` to pass `--cookies-from-browser` to `yt-dlp`
+- `MUX_COOKIES=<file>` to pass a cookies file to `yt-dlp`
+
+Interactive settings commands:
+
+- `settings`
+- `cookies chrome`
+- `cookies edge`
+- `cookies firefox`
+- `cookies brave`
+- `cookies file <path>`
+- `cookies off`
 
 ### Direct query
 
@@ -119,6 +146,32 @@ mux succession focus music
 
 ```bash
 mux https://www.youtube.com/watch?v=...
+```
+
+### YouTube bot-check / cookies
+
+If YouTube starts asking `yt-dlp` to sign in, you can configure cookies inside `mux` itself:
+
+```text
+mux> settings
+mux> cookies edge
+```
+
+Or run `mux` with cookies from the shell:
+
+```powershell
+$env:MUX_COOKIES_FROM_BROWSER="edge"
+mux
+```
+
+```bash
+MUX_COOKIES_FROM_BROWSER=chrome mux
+```
+
+Or use an exported cookies file:
+
+```bash
+MUX_COOKIES=/path/to/cookies.txt mux
 ```
 
 ## Playback keys
