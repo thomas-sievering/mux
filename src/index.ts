@@ -242,18 +242,24 @@ function printSearchResults(entries: SearchEntry[], selected: SearchEntry): void
 }
 
 function startSpinner(label = 'searching'): () => void {
-  const frames = ['⠁', '⠂', '⠄', '⠂'];
+  const frames = ['.', '..', '...'];
   let index = 0;
-  output.write(` ${dim(`${frames[0]} ${label}`)}`);
-  const timer = setInterval(() => {
-    output.write(`\r${' '.repeat(6)}\r`);
-    output.write(`mux> ${dim(`${frames[index % frames.length]} ${label}`)}`);
+  let lastWidth = 0;
+
+  const render = () => {
+    const text = `mux> ${dim(`${label}${frames[index % frames.length]}`)}`;
+    const plain = `mux> ${label}${frames[index % frames.length]}`;
+    lastWidth = Math.max(lastWidth, plain.length);
+    output.write(`\r${text}${' '.repeat(Math.max(0, lastWidth - plain.length))}`);
     index += 1;
-  }, 100);
+  };
+
+  render();
+  const timer = setInterval(render, 280);
 
   return () => {
     clearInterval(timer);
-    clearCurrentScreenLine();
+    output.write(`\r${' '.repeat(lastWidth)}\r`);
   };
 }
 
