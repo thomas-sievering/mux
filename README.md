@@ -191,7 +191,7 @@ Meaning:
 - `f` add current track to favorites
 - `o` open the current YouTube link in your browser
 - `q` quit `mux`
-- `1-9` set volume from 10% to 90%
+- `1-9` set volume from 10% to 90% and remember it for later sessions
 
 Typed commands also work while playing:
 - `pause`

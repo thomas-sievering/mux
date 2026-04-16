@@ -46,6 +46,7 @@ interface FavoritesData {
 interface ConfigData {
   cookiesFromBrowser?: string;
   cookiesFile?: string;
+  preferredVolume?: number;
 }
 
 interface DetectedBrowser {
@@ -65,9 +66,11 @@ interface PlaybackState {
 const APP_NAME = 'mux';
 const MIN_DURATION_SECONDS = 20 * 60;
 const MAX_RESULTS = 10;
-const DEFAULT_VOLUME = 100;
-const FADE_IN_MS = 3000;
-const FADE_IN_STEPS = 12;
+const DEFAULT_VOLUME = 70;
+const FADE_IN_MS = 5000;
+const FADE_IN_STEPS = 20;
+const FADE_OUT_MS = 1200;
+const FADE_OUT_STEPS = 8;
 const HELP_FLAGS = new Set(['-h', '--help']);
 const VERSION_FLAGS = new Set(['-v', '--version']);
 const BOT_CHECK_PATTERN = /sign in to confirm you're not a bot|use --cookies-from-browser or --cookies/i;
@@ -176,6 +179,9 @@ async function readConfig(): Promise<ConfigData> {
     return {
       cookiesFromBrowser: typeof data.cookiesFromBrowser === 'string' ? data.cookiesFromBrowser : undefined,
       cookiesFile: typeof data.cookiesFile === 'string' ? data.cookiesFile : undefined,
+      preferredVolume: typeof data.preferredVolume === 'number' && data.preferredVolume >= 0 && data.preferredVolume <= 100
+        ? Math.round(data.preferredVolume)
+        : undefined,
     };
   } catch {
     return {};
@@ -187,6 +193,9 @@ async function writeConfig(data: ConfigData): Promise<void> {
   const normalized: ConfigData = {};
   if (data.cookiesFromBrowser?.trim()) normalized.cookiesFromBrowser = data.cookiesFromBrowser.trim();
   if (data.cookiesFile?.trim()) normalized.cookiesFile = data.cookiesFile.trim();
+  if (typeof data.preferredVolume === 'number' && data.preferredVolume >= 0 && data.preferredVolume <= 100) {
+    normalized.preferredVolume = Math.round(data.preferredVolume);
+  }
   await fs.writeFile(CONFIG_PATH, JSON.stringify(normalized, null, 2), 'utf8');
 }
 
@@ -259,6 +268,7 @@ async function printSettings(options?: { reason?: string; browsers?: DetectedBro
   console.log(`Config: ${CONFIG_PATH}`);
   console.log(`Saved browser: ${config.cookiesFromBrowser ?? 'none'}`);
   console.log(`Saved file: ${config.cookiesFile ?? 'none'}`);
+  console.log(`Preferred volume: ${config.preferredVolume ?? DEFAULT_VOLUME}%`);
 
   console.log('');
   console.log('Detected browsers');
@@ -332,7 +342,7 @@ async function handleSettingsCommand(inputValue: string): Promise<boolean> {
   const config = await readConfig();
 
   if (subcommand === 'off') {
-    await writeConfig({});
+    await writeConfig({ ...config, cookiesFromBrowser: undefined, cookiesFile: undefined });
     console.log('Cleared saved cookies settings.');
     return true;
   }
@@ -713,11 +723,21 @@ async function openExternalUrl(url: string): Promise<void> {
   });
 }
 
-async function fadeInVolume(ipcPath: string, isCancelled: () => boolean): Promise<void> {
-  const stepDelay = Math.max(1, Math.floor(FADE_IN_MS / FADE_IN_STEPS));
-  for (let step = 1; step <= FADE_IN_STEPS; step += 1) {
+async function getPreferredVolume(): Promise<number> {
+  const config = await readConfig();
+  return config.preferredVolume ?? DEFAULT_VOLUME;
+}
+
+async function setPreferredVolume(volume: number): Promise<void> {
+  const config = await readConfig();
+  await writeConfig({ ...config, preferredVolume: Math.max(0, Math.min(100, Math.round(volume))) });
+}
+
+async function fadeVolume(ipcPath: string, from: number, to: number, durationMs: number, steps: number, isCancelled: () => boolean): Promise<void> {
+  const stepDelay = Math.max(1, Math.floor(durationMs / steps));
+  for (let step = 1; step <= steps; step += 1) {
     if (isCancelled()) return;
-    const volume = Math.round((DEFAULT_VOLUME * step) / FADE_IN_STEPS);
+    const volume = Math.round(from + ((to - from) * step) / steps);
     try {
       await sendMpvCommand(ipcPath, ['set_property', 'volume', volume]);
     } catch {
@@ -725,6 +745,26 @@ async function fadeInVolume(ipcPath: string, isCancelled: () => boolean): Promis
     }
     await sleep(stepDelay);
   }
+}
+
+async function fadeInVolume(ipcPath: string, targetVolume: number, state: PlaybackState, isCancelled: () => boolean): Promise<void> {
+  const waitUntil = Date.now() + 4000;
+  while (Date.now() < waitUntil) {
+    if (isCancelled()) return;
+    if (state.playbackTime > 0 || state.duration) break;
+    await sleep(120);
+  }
+  await fadeVolume(ipcPath, 0, targetVolume, FADE_IN_MS, FADE_IN_STEPS, isCancelled);
+}
+
+async function fadeOutAndQuit(ipcPath: string, child: ReturnType<typeof spawn>, fromVolume: number): Promise<void> {
+  try {
+    await fadeVolume(ipcPath, fromVolume, 0, FADE_OUT_MS, FADE_OUT_STEPS, () => false);
+  } catch {
+    // ignore fade issues, still quit below
+  }
+  try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
+  await terminateProcess(child);
 }
 
 async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise<'stopped' | 'next' | 'quit'> {
@@ -741,6 +781,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   const child = spawn('mpv', mpvArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
   child.stderr.resume();
   child.stdout.resume();
+  const preferredVolume = await getPreferredVolume();
 
   const state: PlaybackState = {
     title: entry.title,
@@ -753,6 +794,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   let socket: net.Socket | null = null;
   let buffer = '';
   let tick = 0;
+  let currentVolume = 0;
   let cancelFadeIn = false;
 
   try {
@@ -771,6 +813,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
             if (msg.name === 'playback-time' && typeof msg.data === 'number') state.playbackTime = msg.data;
             if (msg.name === 'duration' && typeof msg.data === 'number') state.duration = msg.data;
             if (msg.name === 'pause' && typeof msg.data === 'boolean') state.paused = msg.data;
+            if (msg.name === 'volume' && typeof msg.data === 'number') currentVolume = msg.data;
             if (msg.name === 'media-title' && typeof msg.data === 'string') state.title = stripEmojis(msg.data) || msg.data;
           }
         } catch {
@@ -784,6 +827,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
       observe('duration', 2);
       observe('pause', 3);
       observe('media-title', 4);
+      observe('volume', 5);
     });
   } catch {
     // status will still work without IPC updates
@@ -820,15 +864,17 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
 
   const interval = setInterval(render, 150);
   render();
-  void fadeInVolume(ipcPath, () => cancelFadeIn || state.stopped);
+  void fadeInVolume(ipcPath, preferredVolume, state, () => cancelFadeIn || state.stopped).then(() => {
+    if (!cancelFadeIn && !state.stopped) currentVolume = preferredVolume;
+  });
 
   const onKey = async (key: string) => {
     const char = key.toLowerCase();
     if (key === '\u0003') {
+      cancelFadeIn = true;
       state.stopped = true;
       result = 'quit';
-      try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
-      await terminateProcess(child);
+      await fadeOutAndQuit(ipcPath, child, currentVolume || preferredVolume);
       return;
     }
 
@@ -843,7 +889,9 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
         commandBuffer = '';
         cancelFadeIn = true;
         const volume = Number(char) * 10;
+        currentVolume = volume;
         await sendMpvCommand(ipcPath, ['set_property', 'volume', volume]);
+        await setPreferredVolume(volume);
       }
       if (char === 'p' || commandBuffer.endsWith('pause')) {
         commandBuffer = '';
@@ -851,17 +899,17 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
       }
       if (char === 's' || commandBuffer.endsWith('stop')) {
         commandBuffer = '';
+        cancelFadeIn = true;
         state.stopped = true;
         result = 'stopped';
-        try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
-        await terminateProcess(child);
+        await fadeOutAndQuit(ipcPath, child, currentVolume || preferredVolume);
       }
       if (char === 'n' || commandBuffer.endsWith('skip')) {
         commandBuffer = '';
+        cancelFadeIn = true;
         state.stopped = true;
         result = 'next';
-        try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
-        await terminateProcess(child);
+        await fadeOutAndQuit(ipcPath, child, currentVolume || preferredVolume);
       }
       if (char === 'f' || commandBuffer.endsWith('fav')) {
         commandBuffer = '';
@@ -877,10 +925,10 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
       }
       if (char === 'q' || commandBuffer.endsWith('quit')) {
         commandBuffer = '';
+        cancelFadeIn = true;
         state.stopped = true;
         result = 'quit';
-        try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
-        await terminateProcess(child);
+        await fadeOutAndQuit(ipcPath, child, currentVolume || preferredVolume);
       }
     } catch {
       if (char === 'q' || commandBuffer.endsWith('quit')) {
