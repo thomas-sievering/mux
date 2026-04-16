@@ -7,6 +7,7 @@ import {
   pickRandomEntry,
   pickWeightedRandom,
   renderVisualizer,
+  stripEmojis,
   type SearchEntry,
 } from '../src/lib';
 
@@ -63,6 +64,16 @@ describe('pickWeightedRandom', () => {
 describe('renderVisualizer', () => {
   test('returns 12 chars', () => {
     expect(renderVisualizer(0)).toHaveLength(12);
+  });
+});
+
+describe('stripEmojis', () => {
+  test('removes emoji from titles', () => {
+    expect(stripEmojis('🔥 Chill Mix 🎵')).toBe('Chill Mix');
+  });
+
+  test('keeps normal text intact', () => {
+    expect(stripEmojis('Harry Potter ambience music')).toBe('Harry Potter ambience music');
   });
 });
 

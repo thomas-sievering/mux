@@ -23,6 +23,14 @@ export function formatDuration(seconds?: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+export function stripEmojis(value: string): string {
+  return value
+    .replace(/[\p{Extended_Pictographic}\p{Regional_Indicator}]/gu, '')
+    .replace(/[\u{FE00}-\u{FE0F}\u{1F3FB}-\u{1F3FF}\u{200D}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function pickRandomEntry(entries: SearchEntry[], random = Math.random): SearchEntry | null {
   if (entries.length === 0) return null;
   const preferred = entries.filter((entry) => !entry.duration || entry.duration >= MIN_DURATION_SECONDS);

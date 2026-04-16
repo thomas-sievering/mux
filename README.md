@@ -7,6 +7,7 @@ Minimal terminal YouTube player for long mixes, ambience, and focus music.
 - it finds a good long YouTube result
 - plays audio via `mpv`
 - lets you skip, pause, stop, favorite, and replay from the terminal
+- strips emoji from displayed YouTube titles
 
 No browser required.
 
@@ -24,6 +25,7 @@ No browser required.
 - minimal single-line playback status
 - favorites support
 - recent history and weighted shuffle
+- `s` stops playback and returns to the prompt
 
 ## Requirements
 
@@ -131,9 +133,9 @@ Meaning:
 
 - `p` pause / resume
 - `n` skip to next result
-- `s` stop playback
+- `s` stop playback and return to the `mux>` prompt
 - `f` add current track to favorites
-- `q` quit
+- `q` quit `mux`
 - `1-9` set volume from 10% to 90%
 
 Typed commands also work while playing:

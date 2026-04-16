@@ -16,6 +16,7 @@ import {
   pickWeightedRandom,
   RANDOM_POOL_SIZE,
   renderVisualizer,
+  stripEmojis,
   type SearchEntry,
 } from './lib.js';
 
@@ -173,9 +174,10 @@ function normalizeEntry(entry: any): SearchEntry | null {
   const webpageUrl = entry.webpage_url ?? (entry.id ? `https://www.youtube.com/watch?v=${entry.id}` : undefined);
   const url = webpageUrl ?? entry.url;
   if (!id || !title || !url) return null;
+  const cleanTitle = stripEmojis(String(title)) || String(title);
   return {
     id: String(id),
-    title: String(title),
+    title: cleanTitle,
     duration,
     channel: entry.channel ?? entry.uploader,
     webpage_url: webpageUrl,
@@ -387,7 +389,7 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
             if (msg.name === 'playback-time' && typeof msg.data === 'number') state.playbackTime = msg.data;
             if (msg.name === 'duration' && typeof msg.data === 'number') state.duration = msg.data;
             if (msg.name === 'pause' && typeof msg.data === 'boolean') state.paused = msg.data;
-            if (msg.name === 'media-title' && typeof msg.data === 'string') state.title = msg.data;
+            if (msg.name === 'media-title' && typeof msg.data === 'string') state.title = stripEmojis(msg.data) || msg.data;
           }
         } catch {
           // ignore
@@ -466,13 +468,15 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
         commandBuffer = '';
         state.stopped = true;
         result = 'stopped';
-        await sendMpvCommand(ipcPath, ['stop']);
+        try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
+        await terminateProcess(child);
       }
       if (char === 'n' || commandBuffer.endsWith('skip')) {
         commandBuffer = '';
         state.stopped = true;
         result = 'next';
-        await sendMpvCommand(ipcPath, ['stop']);
+        try { await sendMpvCommand(ipcPath, ['quit']); } catch {}
+        await terminateProcess(child);
       }
       if (char === 'f' || commandBuffer.endsWith('fav')) {
         commandBuffer = '';
@@ -570,88 +574,101 @@ async function main(): Promise<void> {
   await requireCommand('yt-dlp');
   await requireCommand('mpv');
 
-  const startup = await resolveStartupInput(process.argv.slice(2));
-  if (startup.mode === 'quit') return;
+  let initialArgs = process.argv.slice(2);
 
-  let query = startup.value ?? '';
-  let selected: SearchEntry | null = null;
+  while (true) {
+    const startup = await resolveStartupInput(initialArgs);
+    initialArgs = [];
+    if (startup.mode === 'quit') return;
 
-  if (startup.mode === 'last') {
-    const history = await readHistory();
-    const last = history.plays.at(-1);
-    if (!last) {
-      console.log('No last item yet.');
-      return;
+    let query = startup.value ?? '';
+    let selected: SearchEntry | null = null;
+
+    if (startup.mode === 'last') {
+      const history = await readHistory();
+      const last = history.plays.at(-1);
+      if (!last) {
+        console.log('No last item yet.');
+        continue;
+      }
+      query = last.query;
+      selected = {
+        id: last.url,
+        title: last.title,
+        duration: last.duration,
+        url: last.url,
+      };
+    } else if (startup.mode === 'shuffle') {
+      const history = await readHistory();
+      const picked = pickWeightedRandom(history.plays.map((p) => p.query).filter(Boolean));
+      if (!picked) {
+        console.log('No history to shuffle yet.');
+        continue;
+      }
+      query = picked;
     }
-    query = last.query;
-    selected = {
-      id: last.url,
-      title: last.title,
-      duration: last.duration,
-      url: last.url,
-    };
-  } else if (startup.mode === 'shuffle') {
-    const history = await readHistory();
-    const picked = pickWeightedRandom(history.plays.map((p) => p.query).filter(Boolean));
-    if (!picked) {
-      console.log('No history to shuffle yet.');
-      return;
+
+    if (!selected && startup.mode === 'favorites') {
+      selected = await chooseFavorite();
+      query = selected?.title ?? '';
     }
-    query = picked;
-  }
 
-  if (!selected && startup.mode === 'favorites') {
-    selected = await chooseFavorite();
-    query = selected?.title ?? '';
-  }
-
-  if (!selected && startup.mode === 'url') {
-    const stopSpinner = startSpinner('loading');
-    try {
-      selected = await inspectUrl(query);
-    } finally {
-      stopSpinner();
+    if (!selected && startup.mode === 'url') {
+      const stopSpinner = startSpinner('loading');
+      try {
+        selected = await inspectUrl(query);
+      } finally {
+        stopSpinner();
+      }
     }
-  }
 
-  let queue: SearchEntry[] = [];
-  if (!selected && query) {
-    const stopSpinner = startSpinner();
-    const results = await searchYoutube(query).finally(stopSpinner);
-    if (results.length === 0) {
-      console.log('No results found.');
-      return;
+    let queue: SearchEntry[] = [];
+    if (!selected && query) {
+      const stopSpinner = startSpinner();
+      const results = await searchYoutube(query).finally(stopSpinner);
+      if (results.length === 0) {
+        console.log('No results found.');
+        continue;
+      }
+      selected = pickRandomEntry(results);
+      if (!selected) continue;
+      printSearchResults(results, selected);
+      queue = results.filter((entry) => entry.url !== selected?.url);
     }
-    selected = pickRandomEntry(results);
-    if (!selected) return;
-    printSearchResults(results, selected);
-    queue = results.filter((entry) => entry.url !== selected?.url);
-  }
 
-  if (!selected) return;
+    if (!selected) continue;
 
-  await appendHistory({
-    query: query || selected.title,
-    title: selected.title,
-    url: selected.url,
-    duration: selected.duration,
-    playedAt: new Date().toISOString(),
-  });
+    await appendHistory({
+      query: query || selected.title,
+      title: selected.title,
+      url: selected.url,
+      duration: selected.duration,
+      playedAt: new Date().toISOString(),
+    });
 
-  let current: SearchEntry | null = selected;
-  while (current) {
-    const result = await playEntry(current, queue);
-    if (result === 'quit' || result === 'stopped') break;
-    current = queue.shift() ?? null;
-    if (current) {
-      await appendHistory({
-        query: query || current.title,
-        title: current.title,
-        url: current.url,
-        duration: current.duration,
-        playedAt: new Date().toISOString(),
-      });
+    let current: SearchEntry | null = selected;
+    let shouldQuit = false;
+    while (current) {
+      const result = await playEntry(current, queue);
+      if (result === 'quit') {
+        shouldQuit = true;
+        break;
+      }
+      if (result === 'stopped') break;
+      current = queue.shift() ?? null;
+      if (current) {
+        await appendHistory({
+          query: query || current.title,
+          title: current.title,
+          url: current.url,
+          duration: current.duration,
+          playedAt: new Date().toISOString(),
+        });
+      }
     }
+
+    if (shouldQuit) return;
+    clearScreen();
   }
 }
 
