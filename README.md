@@ -129,9 +129,12 @@ Interactive settings commands:
 
 - `settings`
 - `cookies chrome`
+- `cookies chrome Profile 2`
 - `cookies edge`
 - `cookies firefox`
 - `cookies brave`
+
+If a Chromium browser is locking its cookie database, `mux` can also offer to close that browser for you and retry.
 - `cookies file <path>`
 - `cookies off`
 
@@ -150,7 +153,7 @@ mux https://www.youtube.com/watch?v=...
 
 ### YouTube bot-check / cookies
 
-If YouTube starts asking `yt-dlp` to sign in, `mux` now tries detected local browser cookie stores automatically first. If that does not work, it opens settings and shows detected cookie stores for Chrome, Edge, Firefox, and Brave. You can pick one by number, or type a command manually:
+If YouTube starts asking `yt-dlp` to sign in, `mux` now tries detected local browser cookie stores automatically first. If that does not work, it opens settings and shows detected browser/profile cookie stores for Chrome, Edge, Firefox, and Brave. You can pick one by number, or type a command manually:
 
 ```text
 mux> settings

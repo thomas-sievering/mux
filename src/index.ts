@@ -45,12 +45,14 @@ interface FavoritesData {
 
 interface ConfigData {
   cookiesFromBrowser?: string;
+  cookiesBrowserProfile?: string;
   cookiesFile?: string;
   preferredVolume?: number;
 }
 
 interface DetectedBrowser {
   name: 'chrome' | 'edge' | 'firefox' | 'brave';
+  profile?: string;
   details: string;
   status?: 'works' | 'failed' | 'untested';
 }
@@ -75,13 +77,16 @@ const FADE_OUT_MS = 1200;
 const FADE_OUT_STEPS = 8;
 const HELP_FLAGS = new Set(['-h', '--help']);
 const VERSION_FLAGS = new Set(['-v', '--version']);
-const BOT_CHECK_PATTERN = /sign in to confirm you're not a bot|use --cookies-from-browser or --cookies/i;
+const BOT_CHECK_PATTERN = /sign in to confirm you(?:'|’)re not a bot|use --cookies-from-browser or --cookies|youtube asked yt-dlp to sign in|the page needs to be reloaded/i;
+const COOKIE_DB_COPY_PATTERN = /could not copy .*cookie database/i;
+const DPAPI_PATTERN = /failed to decrypt with dpapi/i;
 const HISTORY_DIR = path.join(os.homedir(), '.mux');
 const HISTORY_PATH = path.join(HISTORY_DIR, 'history.json');
 const FAVORITES_PATH = path.join(HISTORY_DIR, 'favorites.json');
 const CONFIG_PATH = path.join(HISTORY_DIR, 'config.json');
 let shownPlaybackHelp = false;
 let playbackHeaderLines = 0;
+const browserCloseRetries = new Set<string>();
 
 function clearScreen(): void {
   if (output.isTTY) output.write('\x1Bc');
@@ -135,7 +140,7 @@ function printHelp(): void {
   console.log('');
   console.log('Interactive settings:');
   console.log('  settings                           Show mux settings');
-  console.log('  cookies chrome|edge|firefox|brave  Save browser cookies source');
+  console.log('  cookies <browser> [profile]        Save browser cookies source');
   console.log('  cookies file <path>                Save cookies file path');
   console.log('  cookies off                        Clear saved cookies settings');
   console.log('');
@@ -181,6 +186,7 @@ async function readConfig(): Promise<ConfigData> {
     const data = JSON.parse(raw) as Partial<ConfigData>;
     return {
       cookiesFromBrowser: typeof data.cookiesFromBrowser === 'string' ? data.cookiesFromBrowser : undefined,
+      cookiesBrowserProfile: typeof data.cookiesBrowserProfile === 'string' ? data.cookiesBrowserProfile : undefined,
       cookiesFile: typeof data.cookiesFile === 'string' ? data.cookiesFile : undefined,
       preferredVolume: typeof data.preferredVolume === 'number' && data.preferredVolume >= 0 && data.preferredVolume <= 100
         ? Math.round(data.preferredVolume)
@@ -195,6 +201,7 @@ async function writeConfig(data: ConfigData): Promise<void> {
   await ensureHistory();
   const normalized: ConfigData = {};
   if (data.cookiesFromBrowser?.trim()) normalized.cookiesFromBrowser = data.cookiesFromBrowser.trim();
+  if (data.cookiesBrowserProfile?.trim()) normalized.cookiesBrowserProfile = data.cookiesBrowserProfile.trim();
   if (data.cookiesFile?.trim()) normalized.cookiesFile = data.cookiesFile.trim();
   if (typeof data.preferredVolume === 'number' && data.preferredVolume >= 0 && data.preferredVolume <= 100) {
     normalized.preferredVolume = Math.round(data.preferredVolume);
@@ -207,56 +214,67 @@ function detectBrowsers(): DetectedBrowser[] {
   const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
   const appData = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
 
-  const browserPaths: Array<{ name: DetectedBrowser['name']; paths: string[] }> = [
-    {
-      name: 'chrome',
-      paths: [
-        path.join(localAppData, 'Google', 'Chrome', 'User Data', 'Default', 'Network', 'Cookies'),
-        path.join(localAppData, 'Google', 'Chrome', 'User Data', 'Default', 'Cookies'),
-      ],
-    },
-    {
-      name: 'edge',
-      paths: [
-        path.join(localAppData, 'Microsoft', 'Edge', 'User Data', 'Default', 'Network', 'Cookies'),
-        path.join(localAppData, 'Microsoft', 'Edge', 'User Data', 'Default', 'Cookies'),
-      ],
-    },
-    {
-      name: 'brave',
-      paths: [
-        path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data', 'Default', 'Network', 'Cookies'),
-        path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data', 'Default', 'Cookies'),
-      ],
-    },
-  ];
+  const detectChromiumProfiles = (name: DetectedBrowser['name'], userDataDir: string) => {
+    if (!fsSync.existsSync(userDataDir)) return;
+    try {
+      const entries = fsSync.readdirSync(userDataDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name !== 'Default' && !/^Profile\s+\d+$/i.test(entry.name)) continue;
+        const profileDir = path.join(userDataDir, entry.name);
+        const cookiePath = [
+          path.join(profileDir, 'Network', 'Cookies'),
+          path.join(profileDir, 'Cookies'),
+        ].find((candidate) => fsSync.existsSync(candidate));
+        if (cookiePath) found.push({ name, profile: entry.name, details: cookiePath, status: 'untested' });
+      }
+    } catch {
+      // ignore detection errors
+    }
+  };
 
-  for (const browser of browserPaths) {
-    const existing = browser.paths.find((candidate) => fsSync.existsSync(candidate));
-    if (existing) found.push({ name: browser.name, details: existing, status: 'untested' });
-  }
+  detectChromiumProfiles('chrome', path.join(localAppData, 'Google', 'Chrome', 'User Data'));
+  detectChromiumProfiles('edge', path.join(localAppData, 'Microsoft', 'Edge', 'User Data'));
+  detectChromiumProfiles('brave', path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data'));
 
   const firefoxProfiles = path.join(appData, 'Mozilla', 'Firefox', 'Profiles');
   if (fsSync.existsSync(firefoxProfiles)) {
     try {
-      const profile = fsSync
-        .readdirSync(firefoxProfiles, { withFileTypes: true })
-        .find((entry) => entry.isDirectory() && fsSync.existsSync(path.join(firefoxProfiles, entry.name, 'cookies.sqlite')));
-      if (profile) found.push({ name: 'firefox', details: path.join(firefoxProfiles, profile.name, 'cookies.sqlite'), status: 'untested' });
+      const profiles = fsSync.readdirSync(firefoxProfiles, { withFileTypes: true });
+      for (const profile of profiles) {
+        if (!profile.isDirectory()) continue;
+        const cookiePath = path.join(firefoxProfiles, profile.name, 'cookies.sqlite');
+        if (fsSync.existsSync(cookiePath)) {
+          found.push({ name: 'firefox', profile: profile.name, details: cookiePath, status: 'untested' });
+        }
+      }
     } catch {
       // ignore detection errors
     }
   }
 
   const order: Record<DetectedBrowser['name'], number> = { edge: 0, chrome: 1, brave: 2, firefox: 3 };
-  return found.sort((a, b) => order[a.name] - order[b.name]);
+  return found.sort((a, b) => {
+    const nameOrder = order[a.name] - order[b.name];
+    if (nameOrder !== 0) return nameOrder;
+    if ((a.profile ?? '') === 'Default') return -1;
+    if ((b.profile ?? '') === 'Default') return 1;
+    return (a.profile ?? '').localeCompare(b.profile ?? '');
+  });
+}
+
+function formatSelectedBrowser(config: ConfigData): string {
+  return config.cookiesFromBrowser
+    ? `${config.cookiesFromBrowser}${config.cookiesBrowserProfile ? ` / ${config.cookiesBrowserProfile}` : ''}`
+    : 'none';
 }
 
 function formatBrowserLabel(browser: DetectedBrowser, config: ConfigData): string {
   const tags: string[] = [];
-  if (config.cookiesFromBrowser === browser.name) tags.push('saved');
+  if (config.cookiesFromBrowser === browser.name && (config.cookiesBrowserProfile ?? '') === (browser.profile ?? '')) tags.push('saved');
   if (browser.status && browser.status !== 'untested') tags.push(browser.status);
-  return tags.length > 0 ? `${browser.name} [${tags.join(', ')}]` : browser.name;
+  const label = browser.profile ? `${browser.profile}` : browser.name;
+  return tags.length > 0 ? `${label} [${tags.join(', ')}]` : label;
 }
 
 async function printSettings(options?: { reason?: string; browsers?: DetectedBrowser[]; compactEnvHint?: boolean }): Promise<void> {
@@ -268,15 +286,21 @@ async function printSettings(options?: { reason?: string; browsers?: DetectedBro
   if (options?.reason) console.log(options.reason);
 
   console.log('Settings');
-  console.log(`Config: ${CONFIG_PATH}`);
-  console.log(`Saved browser: ${config.cookiesFromBrowser ?? 'none'}`);
+  console.log(`Saved browser: ${formatSelectedBrowser(config)}`);
   console.log(`Saved file: ${config.cookiesFile ?? 'none'}`);
   console.log(`Preferred volume: ${config.preferredVolume ?? DEFAULT_VOLUME}%`);
 
   console.log('');
-  console.log('Detected browsers');
+  console.log('Detected browser profiles');
   if (browsers.length > 0) {
-    browsers.forEach((browser, index) => console.log(`  ${index + 1}. ${formatBrowserLabel(browser, config)}`));
+    let currentName: DetectedBrowser['name'] | null = null;
+    browsers.forEach((browser, index) => {
+      if (browser.name !== currentName) {
+        currentName = browser.name;
+        console.log(`  ${browser.name}`);
+      }
+      console.log(`    ${index + 1}. ${formatBrowserLabel(browser, config)}`);
+    });
   } else {
     console.log('  none');
   }
@@ -290,8 +314,8 @@ async function printSettings(options?: { reason?: string; browsers?: DetectedBro
 
   console.log('');
   console.log('Commands');
-  if (browsers.length > 0) console.log('  <number>                 Use detected browser');
-  console.log('  cookies chrome|edge|firefox|brave');
+  if (browsers.length > 0) console.log('  <number>                 Use detected profile');
+  console.log('  cookies <browser> [profile]');
   console.log('  cookies file <path>');
   console.log('  cookies off');
 
@@ -311,6 +335,78 @@ function isBotCheckError(error: unknown): boolean {
   return BOT_CHECK_PATTERN.test(message);
 }
 
+function isCookieDbCopyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return COOKIE_DB_COPY_PATTERN.test(message);
+}
+
+function isDpapiError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return DPAPI_PATTERN.test(message);
+}
+
+function isChromiumBrowser(name?: string): boolean {
+  return Boolean(name && ['chrome', 'edge', 'brave'].includes(name));
+}
+
+async function promptYesNo(question: string, defaultNo = true): Promise<boolean> {
+  const suffix = defaultNo ? ' [y/N] ' : ' [Y/n] ';
+  const answer = (await prompt(question + suffix)).trim().toLowerCase();
+  if (!answer) return !defaultNo;
+  return answer === 'y' || answer === 'yes';
+}
+
+async function closeBrowserProcesses(browserName: DetectedBrowser['name']): Promise<void> {
+  const processNames: Record<DetectedBrowser['name'], string[]> = {
+    chrome: ['chrome.exe'],
+    edge: ['msedge.exe'],
+    brave: ['brave.exe'],
+    firefox: ['firefox.exe'],
+  };
+  const names = processNames[browserName] ?? [];
+  for (const name of names) {
+    if (process.platform === 'win32') {
+      await new Promise<void>((resolve) => {
+        const killer = spawn('taskkill', ['/IM', name, '/F'], { stdio: 'ignore' });
+        killer.on('exit', () => resolve());
+        killer.on('error', () => resolve());
+      });
+    } else {
+      await new Promise<void>((resolve) => {
+        const killer = spawn('pkill', ['-f', name.replace('.exe', '')], { stdio: 'ignore' });
+        killer.on('exit', () => resolve());
+        killer.on('error', () => resolve());
+      });
+    }
+  }
+}
+
+async function maybeCloseBrowserForCookies(error: unknown): Promise<boolean> {
+  const config = await readConfig();
+  if (!isChromiumBrowser(config.cookiesFromBrowser)) return false;
+  if (!isCookieDbCopyError(error) && !isDpapiError(error)) return false;
+
+  const selected = formatSelectedBrowser(config);
+  const retryKey = `${config.cookiesFromBrowser}:${config.cookiesBrowserProfile ?? ''}`;
+  if (browserCloseRetries.has(retryKey)) {
+    console.log(isDpapiError(error)
+      ? `${selected} still could not be decrypted after closing the browser. Try another profile/browser or use \`cookies file <path>\`.`
+      : `${selected} is still unavailable after closing the browser. Try another profile/browser or use \`cookies file <path>\`.`);
+    return false;
+  }
+
+  const explanation = isCookieDbCopyError(error)
+    ? `${selected} may still be running and locking its cookie database.`
+    : `${selected} cookies could not be decrypted right now.`;
+  console.log(explanation);
+  const shouldClose = await promptYesNo(`Close ${config.cookiesFromBrowser} for you and retry?`);
+  if (!shouldClose) return false;
+  browserCloseRetries.add(retryKey);
+  await closeBrowserProcesses(config.cookiesFromBrowser as DetectedBrowser['name']);
+  await sleep(1200);
+  return true;
+}
+
 async function openSettingsPrompt(reason?: string, browsers = detectBrowsers()): Promise<boolean> {
   while (true) {
     await printSettings({ reason, browsers, compactEnvHint: true });
@@ -321,8 +417,8 @@ async function openSettingsPrompt(reason?: string, browsers = detectBrowsers()):
     const picked = Number(trimmed);
     if (Number.isInteger(picked) && picked >= 1 && picked <= browsers.length) {
       const browser = browsers[picked - 1]!;
-      await writeConfig({ cookiesFromBrowser: browser.name, cookiesFile: undefined });
-      console.log(`Saved cookies browser: ${browser.name}`);
+      await writeConfig({ cookiesFromBrowser: browser.name, cookiesBrowserProfile: browser.profile, cookiesFile: undefined });
+      console.log(`Saved cookies browser: ${browser.name}${browser.profile ? ` / ${browser.profile}` : ''}`);
       return true;
     }
     const before = JSON.stringify(await readConfig());
@@ -345,7 +441,7 @@ async function handleSettingsCommand(inputValue: string): Promise<boolean> {
   const config = await readConfig();
 
   if (subcommand === 'off') {
-    await writeConfig({ ...config, cookiesFromBrowser: undefined, cookiesFile: undefined });
+    await writeConfig({ ...config, cookiesFromBrowser: undefined, cookiesBrowserProfile: undefined, cookiesFile: undefined });
     console.log('Cleared saved cookies settings.');
     return true;
   }
@@ -356,18 +452,19 @@ async function handleSettingsCommand(inputValue: string): Promise<boolean> {
       console.log('Usage: cookies file <path>');
       return true;
     }
-    await writeConfig({ ...config, cookiesFromBrowser: undefined, cookiesFile: filePath });
+    await writeConfig({ ...config, cookiesFromBrowser: undefined, cookiesBrowserProfile: undefined, cookiesFile: filePath });
     console.log(`Saved cookies file: ${filePath}`);
     return true;
   }
 
   if (subcommand && ['chrome', 'edge', 'firefox', 'brave'].includes(subcommand)) {
-    await writeConfig({ ...config, cookiesFromBrowser: subcommand, cookiesFile: undefined });
-    console.log(`Saved cookies browser: ${subcommand}`);
+    const profile = rest.join(' ').trim() || undefined;
+    await writeConfig({ ...config, cookiesFromBrowser: subcommand, cookiesBrowserProfile: profile, cookiesFile: undefined });
+    console.log(`Saved cookies browser: ${subcommand}${profile ? ` / ${profile}` : ''}`);
     return true;
   }
 
-  console.log('Usage: cookies chrome|edge|firefox|brave | cookies file <path> | cookies off');
+  console.log('Usage: cookies <browser> [profile] | cookies file <path> | cookies off');
   return true;
 }
 
@@ -473,6 +570,12 @@ function normalizeEntry(entry: any): SearchEntry | null {
   };
 }
 
+function getBrowserSpec(browser: { name?: string; profile?: string; cookiesFromBrowser?: string; cookiesBrowserProfile?: string }): string {
+  const name = browser.name ?? browser.cookiesFromBrowser;
+  const profile = browser.profile ?? browser.cookiesBrowserProfile;
+  return profile ? `${name}:${profile}` : String(name);
+}
+
 async function getYtDlpAuthArgs(): Promise<string[]> {
   const cookiesFromBrowser = process.env.MUX_COOKIES_FROM_BROWSER?.trim();
   const cookies = process.env.MUX_COOKIES?.trim();
@@ -480,14 +583,14 @@ async function getYtDlpAuthArgs(): Promise<string[]> {
   if (cookies) return ['--cookies', cookies];
 
   const config = await readConfig();
-  if (config.cookiesFromBrowser) return ['--cookies-from-browser', config.cookiesFromBrowser];
+  if (config.cookiesFromBrowser) return ['--cookies-from-browser', getBrowserSpec(config)];
   if (config.cookiesFile) return ['--cookies', config.cookiesFile];
   return [];
 }
 
 async function runYtDlpWithAuth(authArgs: string[], args: string[]): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
-    const child = spawn('yt-dlp', [...authArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('yt-dlp', ['--extractor-retries', '3', ...authArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += String(chunk); });
@@ -531,9 +634,9 @@ async function runYtDlp(args: string[]): Promise<string> {
   return await runYtDlpWithAuth(authArgs, args);
 }
 
-async function probeBrowserCookies(browser: DetectedBrowser['name']): Promise<boolean> {
+async function probeBrowserCookies(browser: DetectedBrowser): Promise<boolean> {
   try {
-    await runYtDlpWithAuth(['--cookies-from-browser', browser], [
+    await runYtDlpWithAuth(['--cookies-from-browser', getBrowserSpec(browser)], [
       '--dump-single-json',
       '--skip-download',
       '--no-warnings',
@@ -552,12 +655,12 @@ async function autoConfigureBrowserCookies(): Promise<DetectedBrowser | null> {
 
   console.log(dim('Trying detected browser cookies...'));
   for (const browser of browsers) {
-    output.write(`${dim(`- testing ${browser.name}...`)}` + '\n');
-    const works = await probeBrowserCookies(browser.name);
+    output.write(`${dim(`- testing ${formatBrowserLabel(browser, await readConfig())}...`)}` + '\n');
+    const works = await probeBrowserCookies(browser);
     browser.status = works ? 'works' : 'failed';
     if (works) {
-      await writeConfig({ cookiesFromBrowser: browser.name, cookiesFile: undefined });
-      console.log(`Using ${browser.name} cookies.`);
+      await writeConfig({ cookiesFromBrowser: browser.name, cookiesBrowserProfile: browser.profile, cookiesFile: undefined });
+      console.log(`Using ${browser.name}${browser.profile ? ` / ${browser.profile}` : ''} cookies.`);
       return browser;
     }
   }
@@ -843,9 +946,12 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
 
   clearScreen();
   setTerminalTitle(`♫ ${entry.title}`);
-  playbackHeaderLines = 0;
+  const controlsForState = () => state.paused
+    ? '[p]lay  [n]ext  [s]top  [f]av  [l]oop  [o]pen  [q]uit  [1-9] vol'
+    : '[p]ause  [n]ext  [s]top  [f]av  [l]oop  [o]pen  [q]uit  [1-9] vol';
+  playbackHeaderLines = 2;
   console.log(soft(entry.title));
-  console.log(dim('[p]ause  [n]ext  [s]top  [f]av  [l]oop  [o]pen  [q]uit  [1-9] vol'));
+  console.log(dim(controlsForState()));
   shownPlaybackHelp = true;
 
   const oldRaw = input.isRaw;
@@ -858,7 +964,16 @@ async function playEntry(entry: SearchEntry, queue: SearchEntry[] = []): Promise
   let commandBuffer = '';
 
   let lastLineWidth = 0;
+  let lastControls = controlsForState();
   const render = () => {
+    const controls = controlsForState();
+    if (controls !== lastControls) {
+      moveCursor(output, 0, -1);
+      clearCurrentLine();
+      output.write(dim(controls));
+      output.write('\n');
+      lastControls = controls;
+    }
     const baseStatus = state.loading ? 'loading' : state.paused ? 'paused' : 'play';
     const status = `${baseStatus}${state.loop ? ' ↻' : ''}`;
     const viz = state.paused || state.stopped || state.loading ? ' ' : renderVisualizer(tick);
@@ -1082,20 +1197,32 @@ async function main(): Promise<void> {
     if (!selected && startup.mode === 'url') {
       while (!selected) {
         const stopSpinner = startSpinner('loading');
+        let spinnerStopped = false;
+        const stopSpinnerOnce = () => {
+          if (spinnerStopped) return;
+          spinnerStopped = true;
+          stopSpinner();
+        };
         try {
           selected = await inspectUrl(query);
         } catch (error) {
+          stopSpinnerOnce();
           if (isBotCheckError(error)) {
             const detected = await autoConfigureBrowserCookies();
             if (detected) continue;
             const updated = await openSettingsPrompt('YouTube bot-check detected. I could not automatically verify your local browser cookies. Pick one below and mux will save it.');
+            if (updated) continue;
+          } else if (isCookieDbCopyError(error) || isDpapiError(error)) {
+            const closed = await maybeCloseBrowserForCookies(error);
+            if (closed) continue;
+            const updated = await openSettingsPrompt('mux could not use the selected browser cookies. Try another profile, let mux close the browser, or use `cookies file <path>`.');
             if (updated) continue;
           } else {
             console.log(error instanceof Error ? error.message : String(error));
           }
           break;
         } finally {
-          stopSpinner();
+          stopSpinnerOnce();
         }
       }
       if (!selected) continue;
@@ -1107,9 +1234,16 @@ async function main(): Promise<void> {
       let searchFailed = false;
       while (results.length === 0) {
         const stopSpinner = startSpinner();
+        let spinnerStopped = false;
+        const stopSpinnerOnce = () => {
+          if (spinnerStopped) return;
+          spinnerStopped = true;
+          stopSpinner();
+        };
         try {
           results = await searchYoutube(query);
         } catch (error) {
+          stopSpinnerOnce();
           searchFailed = true;
           if (isBotCheckError(error)) {
             const detected = await autoConfigureBrowserCookies();
@@ -1122,12 +1256,23 @@ async function main(): Promise<void> {
               searchFailed = false;
               continue;
             }
+          } else if (isCookieDbCopyError(error) || isDpapiError(error)) {
+            const closed = await maybeCloseBrowserForCookies(error);
+            if (closed) {
+              searchFailed = false;
+              continue;
+            }
+            const updated = await openSettingsPrompt('mux could not use the selected browser cookies. Try another profile, let mux close the browser, or use `cookies file <path>`.');
+            if (updated) {
+              searchFailed = false;
+              continue;
+            }
           } else {
             console.log(error instanceof Error ? error.message : String(error));
           }
           break;
         } finally {
-          stopSpinner();
+          stopSpinnerOnce();
         }
       }
       if (searchFailed) continue;
